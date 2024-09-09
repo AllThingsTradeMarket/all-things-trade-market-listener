@@ -16,10 +16,11 @@ const processCreateExchangeOffer = async (exchangeOfferRequest: CreateExchangeOf
             await createExchangeOfferOfferedProducts(exchangeOfferId, exchangeOfferRequest.offeredProductsIds!);
         }
         await createExchangeOfferRequestedProducts(exchangeOfferId, exchangeOfferRequest.requestedProductsIds);
-        
         console.log('Succesfully created exchange offer! With proper assignments')
+        return exchangeOfferRequest.receiverId;
     } catch (err) {
         console.error('Error creating exchange offer:', err);
+        return err;
     }
 }
 
@@ -43,7 +44,14 @@ export const connectToExchangeOfferQueue = () => {
             channel.consume(queue, async (msg) => {
                 if (msg !== null) {
                     const exchangeOfferData = JSON.parse(msg.content.toString());
-                    await processCreateExchangeOffer(exchangeOfferData);
+                    const exchangeOfferReceiverId = await processCreateExchangeOffer(exchangeOfferData);
+                    if (exchangeOfferReceiverId) {
+                        channel.sendToQueue(msg.properties.replyTo, Buffer.from(JSON.stringify(
+                            { receiverId: exchangeOfferReceiverId }
+                        )), {
+                            correlationId: msg.properties.correlationId
+                        });
+                    }
                     channel.ack(msg);
                 }
             });
