@@ -1,11 +1,13 @@
-import amqp from 'amqplib/callback_api';
-import { RABBITMQ_URI } from '../utils/constants/constants';
 import { queues_names } from '../utils/constants/queues_names';
 import { CreateExchangeOfferDto } from '../dtos/exchange_offer.dtos';
 import { createExchangeOfferOfferedProducts, createExchangeOfferRequestedProducts, insertExchangeOfferToDb } from '../utils/helpers/exchangeOfferHelpers/exchange_offer.helpers';
 import { isEmpty } from 'lodash';
+import { ErrorMessage } from '../types/shared.types';
+import { ExchangeOfferCreateResponse, ExchangeOfferUpdateRequest, ExchangeOfferUpdateResponse } from '../types/exchange_offer.types';
+import { createListener, defaultErrorHandlingFunction } from '../utils/helpers/listener_creator';
+import { exchangeOffersDb } from '../models/exchange_offer.model';
 
-const processCreateExchangeOffer = async (exchangeOfferRequest: CreateExchangeOfferDto) => {
+const processCreateExchangeOffer = async (exchangeOfferRequest: CreateExchangeOfferDto): Promise<ExchangeOfferCreateResponse | ErrorMessage> => {
     try {
         const exchangeOfferId = await insertExchangeOfferToDb(exchangeOfferRequest);
         if (exchangeOfferId === -1) {
@@ -17,44 +19,44 @@ const processCreateExchangeOffer = async (exchangeOfferRequest: CreateExchangeOf
         }
         await createExchangeOfferRequestedProducts(exchangeOfferId, exchangeOfferRequest.requestedProductsIds);
         console.log('Succesfully created exchange offer! With proper assignments')
-        return exchangeOfferRequest.receiverId;
+        return {
+            receiverId: exchangeOfferRequest.receiverId
+        };
     } catch (err) {
         console.error('Error creating exchange offer:', err);
-        return err;
+        return defaultErrorHandlingFunction(err);
     }
-}
+};
 
 export const connectToExchangeOfferQueue = () => {
-    amqp.connect(RABBITMQ_URI, (err, connection) => {
-        if (err) {
-            throw new Error('Could not connect to RabbitMQ');
+    createListener<CreateExchangeOfferDto, ExchangeOfferCreateResponse>(queues_names.EXCHANGE_OFFER_QUEUE, processCreateExchangeOffer);
+};
+
+const processExchangeOfferUpdate = async (updateExchangeOfferRequest: ExchangeOfferUpdateRequest): Promise<ExchangeOfferUpdateResponse | ErrorMessage> => {
+    try {
+        const result = await exchangeOffersDb()
+            .where({ id: updateExchangeOfferRequest.id })
+            .update({ status: updateExchangeOfferRequest.status })
+            .returning('*');
+
+        if (result.length === 0) {
+            throw Error('404: Exchange offer not found');
         }
 
-        console.log('Connected to RabbitMQ');
+        const updatedOffer = result[0];
 
-        connection.createChannel((err, channel) => {
-            if (err) {
-                throw new Error('Could not create channel');
-            }
+        return {
+            status: updateExchangeOfferRequest.status,
+            receiverId: updatedOffer.receiverId,
+            senderId: updatedOffer.senderId
+        };
+    } catch (error) {
+        console.log(error);
+        return defaultErrorHandlingFunction(error);
+    }
+    
+};
 
-            const queue = queues_names.EXCHANGE_OFFER_QUEUE;
-            channel.assertQueue(queue, { durable: true });
-            console.log(`Waiting for messages in ${queue}`);
-
-            channel.consume(queue, async (msg) => {
-                if (msg !== null) {
-                    const exchangeOfferData = JSON.parse(msg.content.toString());
-                    const exchangeOfferReceiverId = await processCreateExchangeOffer(exchangeOfferData);
-                    if (exchangeOfferReceiverId) {
-                        channel.sendToQueue(msg.properties.replyTo, Buffer.from(JSON.stringify(
-                            { receiverId: exchangeOfferReceiverId }
-                        )), {
-                            correlationId: msg.properties.correlationId
-                        });
-                    }
-                    channel.ack(msg);
-                }
-            });
-        });
-    });
-}
+export const connectToExchangeOfferUpdateQueue = () => {
+    createListener<ExchangeOfferUpdateRequest, ExchangeOfferUpdateResponse>(queues_names.EXCHANGE_OFFER_UPDATE_QUEUE, processExchangeOfferUpdate);
+};
